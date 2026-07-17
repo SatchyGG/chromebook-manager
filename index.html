@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chromebook配置管理（PDF・Excel対応）</title>
+    <script src="https://unpkg.com/html5-qrcode"></script>
+    <style>
+        body { font-family: sans-serif; text-align: center; padding: 20px; background: #f5f5f5; color: #333; }
+        #reader { width: 100%; max-width: 500px; margin: 0 auto; background: white; padding: 10px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        
+        .status-box { margin: 20px auto; padding: 15px; max-width: 500px; border-radius: 5px; font-weight: bold; font-size: 1.1rem; transition: all 0.3s; }
+        .mode-cabinet { background: #fff3e0; border: 3px solid #ff9800; color: #e65100; }
+        .mode-device { background: #e3f2fd; border: 3px solid #2196f3; color: #0d47a1; }
+        .btn { padding: 12px 25px; font-size: 1rem; font-weight: bold; color: white; border: none; border-radius: 5px; cursor: pointer; box-shadow: 0 2px 4px rgba(0,0,0,0.2); margin: 5px; }
+        #btn-finish { display: none; background-color: #f44336; }
+        #btn-finish:hover { background-color: #d32f2f; }
+        
+        .btn-excel { background-color: #2e7d32; }
+        .btn-excel:hover { background-color: #1b5e20; }
+        .btn-pdf { background-color: #0288d1; }
+        .btn-pdf:hover { background-color: #01579b; }
+        
+        .log-box { max-width: 500px; margin: 20px auto; text-align: left; background: #fff; padding: 10px; border-radius: 5px; border: 1px solid #ccc; height: 150px; overflow-y: auto; }
+        .log-item { padding: 5px; border-bottom: 1px solid #eee; font-size: 0.9rem; }
+        #print-area { display: none; }
+        @media print {
+            h1, .status-box, div:has(> .btn), #reader, h3, #logs { display: none !important; }
+            body { background: white; padding: 0; margin: 0; }
+            #print-area { display: block !important; width: 100%; }
+            .pdf-table { width: 100%; border-collapse: collapse; margin-top: 20px; font-family: 'MS Gothic', 'Meiryo', sans-serif; }
+            .pdf-table th, .pdf-table td { border: 1px solid #333; padding: 8px; font-size: 10pt; }
+            .pdf-table th { background-color: #eaeded !important; color: #000; font-weight: bold; }
+            .pdf-table td { text-align: center; }
+            @page { size: A4 portrait; margin: 15mm; }
+        }
+    </style>
+    <link rel="manifest" href="/manifest.json">
+    <script>
+        if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js');
+    </script>
+</head>
+<body>
+
+    <h1>Chromebook 配置登録</h1>
+    
+    <div id="status" class="status-box mode-cabinet">
+        【ステップ 1】<br>最初に「キャビネット（棚）」のバーコードをスキャンしてください。
+    </div>
+
+    <div>
+        <button id="btn-finish" class="btn" onclick="finishCabinetMode()">このキャビネットの登録を終了する</button>
+        <button class="btn btn-excel" onclick="downloadExcel()">📊 Excel出力</button>
+        <button class="btn btn-pdf" onclick="generatePDF()">📄 PDF・印刷出力</button>
+    </div>
+
+    <div id="reader"></div>
+
+    <h3>スキャン履歴（ブラウザ上）</h3>
+    <div id="logs" class="log-box">
+        <div style="color: #888; text-align: center; padding-top: 50px;">ここに読み取り履歴が表示されます</div>
+    </div>
+
+
+    <div id="print-area">
+        <h2 style="text-align: left; border-bottom: 2px solid #333; padding-bottom: 5px;">Chromebook 配置管理台帳</h2>
+        <p style="text-align: right; font-size: 10pt;" id="pdf-date"></p>
+        <table class="pdf-table">
+            <thead>
+                <tr>
+                    <th style="width: 25%;">登録日時</th>
+                    <th style="width: 30%;">キャビネット（棚）コード</th>
+                    <th style="width: 30%;">端末シリアル / バーコード</th>
+                    <th style="width: 15%;">状態</th>
+                </tr>
+            </thead>
+            <tbody id="pdf-table-body">
+                </tbody>
+        </table>
+    </div>
+
+
+    <script>
+        let currentMode = 'CABINET';
+        let selectedCabinetBarcode = '';
+        let lastScannedText = '';
+        let scanLockTimer = null;
+        const LOCK_TIME_MS = 3000;
+        let localScanHistory = [];
+
+        function onScanSuccess(decodedText, decodedResult) {
+            if (decodedText === lastScannedText) return; 
+            
+            lastScannedText = decodedText;
+            if (scanLockTimer) clearTimeout(scanLockTimer);
+            scanLockTimer = setTimeout(() => { lastScannedText = ''; }, LOCK_TIME_MS);
+
+            const statusDiv = document.getElementById('status');
+            const finishBtn = document.getElementById('btn-finish');
+
+            if (currentMode === 'CABINET') {
+                selectedCabinetBarcode = decodedText;
+                currentMode = 'DEVICE';
+                
+                statusDiv.innerHTML = `【現在: キャビネット [ <span style="color:#d32f2f">${selectedCabinetBarcode}</span> ] にロック中】<br>続けて「端末」のバーコードを次々にスキャンしてください。`;
+                statusDiv.className = "status-box mode-device";
+                finishBtn.style.display = 'inline-block'; 
+                
+                addLog(`📂 キャビネット [${decodedText}] を選択しました。`);
+
+            } else if (currentMode === 'DEVICE') {
+                if (decodedText === selectedCabinetBarcode) {
+                    addLog(`⚠️ 警告: キャビネットと同じバーコード [${decodedText}] です。無視します。`);
+                    return;
+                }
+
+                const nowStr = new Date().toLocaleString('ja-JP');
+
+                fetch('/api/assign', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        cabinet_barcode: selectedCabinetBarcode,
+                        device_barcode: decodedText
+                    })
+                })
+                .then(res => res.json())
+                .then(data => {
+                    // サーバー保存成功時のみ、PDF用のローカル配列にも追加
+                    if(data.success !== false) {
+                        localScanHistory.push({ time: nowStr, cabinet: selectedCabinetBarcode, device: decodedText });
+                        addLog(`💻 端末 [${decodedText}] ➔ 登録完了！`);
+                    } else {
+                        addLog(`⚠️ ${data.message}`);
+                    }
+                })
+                .catch(err => {
+                    addLog(`❌ 送信エラー: 端末 [${decodedText}]`);
+                });
+            }
+        }
+
+        function finishCabinetMode() {
+            currentMode = 'CABINET';
+            selectedCabinetBarcode = '';
+            lastScannedText = '';
+            if (scanLockTimer) clearTimeout(scanLockTimer);
+            
+            const statusDiv = document.getElementById('status');
+            const finishBtn = document.getElementById('btn-finish');
+            
+            statusDiv.innerHTML = "【ステップ 1】<br>最初に「キャビネット（棚）」のバーコードをスキャンしてください。";
+            statusDiv.className = "status-box mode-cabinet";
+            finishBtn.style.display = 'none'; 
+            
+            addLog("戻る ➔ キャビネット選択を解除しました。");
+        }
+
+        function downloadExcel() {
+            window.location.href = '/api/download-excel';
+        }
+        function generatePDF() {
+            const tableBody = document.getElementById('pdf-table-body');
+            const datePara = document.getElementById('pdf-date');
+            datePara.innerText = `出力日時: ${new Date().toLocaleString('ja-JP')}`;
+            tableBody.innerHTML = '';
+            
+            if (localScanHistory.length === 0) {
+                alert("データがありません。バーコードをスキャンしてから出力してください。");
+                return;
+            }
+            localScanHistory.forEach(item => {
+                const row = `<tr>
+                    <td>${item.time}</td>
+                    <td>${item.cabinet}</td>
+                    <td>${item.device}</td>
+                    <td>配置完了</td>
+                </tr>`;
+                tableBody.innerHTML += row;
+            });
+
+                       window.print();
+        }
+
+        function addLog(message) {
+            const logsDiv = document.getElementById('logs');
+            if (logsDiv.innerHTML.includes("ここに読み取り履歴が表示されます")) logsDiv.innerHTML = "";
+            const time = new Date().toLocaleTimeString();
+            logsDiv.innerHTML = `<div class="log-item">[${time}] ${message}</div>` + logsDiv.innerHTML;
+        }
+
+        const html5QrcodeScanner = new Html5QrcodeScanner("reader", { fps: 10, qrbox: { width: 280, height: 160 } });
+        html5QrcodeScanner.render(onScanSuccess);
+    </script>
+</body>
+</html>
